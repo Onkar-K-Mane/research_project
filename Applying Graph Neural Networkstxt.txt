@@ -1,0 +1,46 @@
+@Applying Graph Neural Networks for Context-Aware Detection of Malicious PowerShell Attacks
+
+---
+
+Abstract
+
+Living Off the Land (LotL) attacks, particularly those leveraging PowerShell, represent a critical threat that evades traditional signature-based security[cite: 7138, 7139]. [cite_start]Existing advanced detection methods often suffer from high false positive rates, a lack of deep context, poor scalability, and an inability to explain their decisions[cite: 7234, 7242, 9591]. This project proposes a novel, hierarchical AI framework focused solely on endpoint telemetry to address these gaps. The system ingests logs from **Sysmon** into a real-time **provenance graph**. A fast, lightweight Random Forest model performs initial triage, passing only suspicious events to a powerful, hybrid deep learning model. This core model combines a Graph Neural Network (GNN) to analyze behavioral context with an NLP Transformer to understand script intent, even when obfuscated. [cite_start]Upon detection, the system automatically reconstructs the full attack chain, provides an explanation via an Explainable AI (XAI) module, and maps the attack to the MITRE ATT&CK® framework[cite: 7296]. The expected outcome is a scalable, accurate, and trustworthy system for detecting and analyzing sophisticated PowerShell-based threats using only endpoint data.
+
+---
+Problem Statement
+
+The core problem is the inability of current security solutions to reliably and efficiently differentiate between benign administrative PowerShell activity and malicious LotL attacks using available endpoint data[cite: 7231, 8421]. [cite_start]This leads to either missed sophisticated attacks or overwhelming false positive alerts for security analysts[cite: 7235]. The research literature indicates specific gaps this project will address:
+
+1.  **Siloed Analysis**: Systems often analyze either behavioral **context** (e.g., parent-child) or script **content** (e.g., keywords), but not both in an integrated way[cite: 5695].
+2.  **Lack of Rich Context**: Simple endpoint log analysis misses the full, multi-relational story captured in a **provenance graph**[cite: 8785, 9997].
+3.  **Scalability**: High computational overhead of advanced AI models makes real-time analysis difficult[cite: 7242, 9621].
+4.  **Lack of Interpretability**: The "black box" nature of deep learning hinders analyst trust and actionability[cite: 9591].
+
+---
+### **Proposed Solution & Methodology**
+
+The solution is a multi-stage pipeline focused on deep analysis of Sysmon logs and network logs.
+
+#### **1. Data Foundation: The Endpoint Provenance Graph**
+* The system ingests high-fidelity logs from **Sysmon** and network
+* A data engineering module parses these logs and constructs a **provenance graph** where nodes are endpoint entities and edges are the actions connecting them.
+
+#### **2. The Hierarchical AI Engine**
+Tier 1 (Fast Filter)**: A lightweight **Random Forest** model performs high-speed triage on PowerShell command-line features 
+Tier 2 (Deep Analysis)**: Suspicious events are passed to a hybrid model:
+A **Graph Neural Network (GNN)** analyzes the event's behavioral context within the endpoint provenance graph.
+An **NLP Transformer** analyzes the PowerShell script's content to understand intent and defeat obfuscation
+3. Analysis & Reporting**
+* **Attack Chain Reconstruction**: A graph traversal algorithm builds the attack story using only the endpoint graph data.
+* **Explainable AI (XAI)**: An XAI module highlights the key endpoint evidence (e.g., parent process, specific command tokens) that triggered the alert.
+**MITRE ATT&CK® Mapping**: The chain is mapped to relevant TTPs.
+
+---
+
+---
+### **Evaluation Strategy**
+
+**Quantitative Metrics**: Precision, Recall, F1-Score, and Triage Efficiency will be measured using a held-out test set generated via **MITRE Caldera*
+* **Qualitative Metrics**: Case studies will assess the accuracy of the reconstructed attack chains and the clarity of the XAI explanations based solely on endpoint data.
+
+This revised scope is strong, focused, and retains the core novelties of the hybrid AI and explainability while being more manageable by concentrating entirely on maximizing insights from endpoint telemetry.

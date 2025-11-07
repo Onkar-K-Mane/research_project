@@ -18,13 +18,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- Malicious Command Logger ---
+malicious_logger = logging.getLogger('malicious_commands')
+malicious_logger.setLevel(logging.INFO)
+malicious_handler = logging.FileHandler('malicious_commands.log')
+malicious_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+malicious_logger.addHandler(malicious_handler)
+
 # --- ML Model Loading ---
 try:
     rf_model = joblib.load("triage_model/rf_triage_model.pkl")
     logger.info("PowerShell triage model loaded successfully.")
 except Exception as e:
     rf_model = None
-    logger.warning(f"Could not load triage model: {e}. Triage will be disabled.")
+    logger.warning(f"Could not load triage model: {e}. Triage will be disabled (or in data collection mode).")
 
 # --- Global Graph Object ---
 G = nx.DiGraph()
@@ -147,48 +154,73 @@ def handle_event_1(event_data, timestamp):
     with graph_lock:
         G.add_edge(parent_guid, child_guid, action='ProcessCreate', timestamp=timestamp)
 
-    # --- PowerShell Triage ---
+    # --- START: MODIFIED CODE BLOCK FOR DATA COLLECTION / TRIAGE ---
     image = event_data.get('Image', '').lower()
-    if 'powershell' in image and rf_model:
+    if 'powershell' in image:
         cmd = event_data.get('CommandLine', '')
         entropy = len(set(cmd)) / len(cmd) if cmd else 0
-        
-        # Heuristic check
-        is_suspicious_heuristic = False
-        if any(kw in cmd.lower() for kw in ['invoke', 'iex', 'download', 'webclient', 'encodedcommand']):
-            is_suspicious_heuristic = True
-            logger.warning(f"SUSPICIOUS PowerShell: {child_guid} | Cmd: {cmd[:100]}...")
 
-        # ML-based check
+        # If the model is loaded, try to predict
+        if rf_model:
+            try:
+                with graph_lock:
+                    parent_count = len(list(G.predecessors(child_guid)))
+                    child_process_count = len(list(G.successors(child_guid)))
+                    network_connections = len([n for n in G.successors(child_guid) if G.nodes[n].get('type') == 'ip_address'])
+                    dns_queries = len([n for n in G.successors(child_guid) if G.nodes[n].get('type') == 'domain'])
+                    files_created = len([n for n in G.successors(child_guid) if G.nodes[n].get('type') == 'file'])
+
+                temp_features = {
+                    'parent_count': parent_count,
+                    'child_process_count': child_process_count,
+                    'network_connections': network_connections,
+                    'dns_queries': dns_queries,
+                    'files_created': files_created,
+                    'has_invoke': 1 if 'invoke' in cmd.lower() or 'iex' in cmd.lower() else 0,
+                    'has_download': 1 if 'download' in cmd.lower() or 'webclient' in cmd.lower() or 'iwr' in cmd.lower() else 0,
+                    'has_encoded': 1 if 'encodedcommand' in cmd.lower() or '-enc' in cmd.lower() or '-e' in cmd.lower() else 0,
+                    'entropy': entropy,
+                }
+                
+                # Use a DataFrame to ensure column order matches the model's expectation
+                X = pd.DataFrame([temp_features], columns=rf_model.feature_names_in_)
+                feature_values = X.values
+                
+                prediction = rf_model.predict([feature_values])
+                
+                if prediction[0] == 1: # Assuming 1 is malicious
+                    malicious_logger.info(f"Malicious PowerShell command detected: GUID={child_guid}, Parent={features['parent_name']}, Cmd='{cmd}'")
+            
+            except Exception as e:
+                logger.error(f"Failed to run prediction for {child_guid}: {e}")
+
+        # Still save features for training/data collection
         try:
             with graph_lock:
                 parent_count = len(list(G.predecessors(child_guid)))
                 child_process_count = len(list(G.successors(child_guid)))
+                network_connections = len([n for n in G.successors(child_guid) if G.nodes[n].get('type') == 'ip_address'])
+                dns_queries = len([n for n in G.successors(child_guid) if G.nodes[n].get('type') == 'domain'])
+                files_created = len([n for n in G.successors(child_guid) if G.nodes[n].get('type') == 'file'])
 
             features = {
-                'parent_count': parent_count,
-                'child_process_count': child_process_count,
-                'network_connections': 0, # Placeholder, can be enriched later
-                'dns_queries': 0, # Placeholder
-                'files_created': 0, # Placeholder
+                'guid': child_guid, 'timestamp': timestamp, 'command': cmd,
+                'parent_guid': parent_guid, 'parent_name': event_data.get('ParentImage', 'unknown'),
+                'parent_count': parent_count, 'child_process_count': child_process_count,
+                'network_connections': network_connections, 'dns_queries': dns_queries, 'files_created': files_created,
                 'has_invoke': 1 if 'invoke' in cmd.lower() or 'iex' in cmd.lower() else 0,
-                'has_download': 1 if 'download' in cmd.lower() or 'webclient' in cmd.lower() else 0,
-                'has_encoded': 1 if 'encodedcommand' in cmd.lower() or '-enc' in cmd.lower() else 0,
+                'has_download': 1 if 'download' in cmd.lower() or 'webclient' in cmd.lower() or 'iwr' in cmd.lower() else 0,
+                'has_encoded': 1 if 'encodedcommand' in cmd.lower() or '-enc' in cmd.lower() or '-e' in cmd.lower() else 0,
                 'entropy': entropy,
             }
-            X = pd.DataFrame([features], columns=rf_model.feature_names_in_)
-            prediction = rf_model.predict(X)[0]
-
-            if prediction == 1:
-                logger.critical(f"[ML TRIAGE ALERT] Malicious PowerShell detected: {child_guid}")
-                with open("suspicious_events.jsonl", "a") as f:
-                    json.dump({
-                        "guid": child_guid, "timestamp": timestamp, "command": cmd,
-                        "features": features, "prediction": int(prediction)
-                    }, f)
-                    f.write("\n")
+            with open("powershell_training_data.jsonl", "a") as f:
+                json.dump(features, f)
+                f.write("\n")
+            logger.info(f"DATA COLLECTION: Captured PowerShell: {child_guid} | Cmd: {cmd[:100]}...")
+                
         except Exception as e:
-            logger.error(f"ML triage failed for {child_guid}: {e}")
+            logger.error(f"Data collection failed for {child_guid}: {e}")
+    # --- END: MODIFIED CODE BLOCK FOR DATA COLLECTION / TRIAGE ---
 
 def handle_event_3(event_data, timestamp):
     process_guid = get_process_guid(event_data)

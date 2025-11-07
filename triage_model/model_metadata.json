@@ -1,0 +1,39 @@
+{
+  "generated_at": "2025-11-06T16:26:23.385775+00:00",
+  "dataset": "powershell_events_apt.csv",
+  "total_samples": 2000,
+  "malicious_samples": 1000,
+  "features": [
+    "parent_count",
+    "child_process_count",
+    "network_connections",
+    "dns_queries",
+    "files_created",
+    "has_invoke",
+    "has_download",
+    "has_encoded",
+    "entropy"
+  ],
+  "recall_malicious": 1.0,
+  "false_negatives": 0,
+  "class_weights": {
+    "0": 1.0,
+    "1": 2.0
+  },
+  "model_params": {
+    "n_estimators": 500,
+    "class_weight": "custom_high_recall",
+    "objective": "Zero False Negatives on Malicious"
+  },
+  "feature_importance": {
+    "child_process_count": 0.32452391691599897,
+    "network_connections": 0.28660913624017514,
+    "files_created": 0.28348978901239585,
+    "dns_queries": 0.0584792941524421,
+    "entropy": 0.02638560799679601,
+    "has_invoke": 0.01801207357005253,
+    "has_encoded": 0.002222539664605888,
+    "has_download": 0.0002776424475336439,
+    "parent_count": 0.0
+  }
+}

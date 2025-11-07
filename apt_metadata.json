@@ -1,0 +1,9 @@
+{
+  "generated_at": "2025-11-06T08:06:25.042834+00:00",
+  "total_rows": 2000,
+  "benign_templates": 500,
+  "malicious_templates": 500,
+  "obfuscation_rate": 0.92,
+  "graph_nodes": 7926,
+  "graph_edges": 9002
+}

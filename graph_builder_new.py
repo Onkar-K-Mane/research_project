@@ -1,5 +1,5 @@
-# graph_builder_data_collection.py
-# ENHANCED: Full RF Triage + Event 5/12/13 + Live Graph Features
+# graph_builder_new.py
+# ENHANCED: Full RF Triage + Event 5/12/13 + Live Graph Features + GAT + XAI + MITRE
 
 import win32evtlog
 import xml.etree.ElementTree as ET
@@ -13,6 +13,11 @@ import pandas as pd
 import joblib
 import json
 import os
+import torch
+import torch.nn.functional as F
+from torch_geometric.utils import from_networkx
+from torch_geometric.nn import GATConv, global_mean_pool
+import re
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -27,7 +32,7 @@ malicious_logger = logging.getLogger('malicious')
 malicious_logger.setLevel(logging.INFO)
 os.makedirs("logs", exist_ok=True)
 mal_handler = logging.FileHandler('logs/malicious_commands.log')
-mal_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+mal_handler.setFormatter(logging.Formatter('%(message)s'))
 malicious_logger.addHandler(mal_handler)
 
 # --- Load RF Model ---
@@ -38,12 +43,46 @@ except Exception as e:
     rf_model = None
     logger.error(f"Model failed to load: {e}. Triage disabled.")
 
+# --- Load GAT Model ---
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+class GATDetector(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gat1 = GATConv(5, 64, heads=4, dropout=0.3)
+        self.gat2 = GATConv(64*4, 64, heads=1, dropout=0.3)
+        self.lin = torch.nn.Linear(64, 2)
+    
+    def forward(self, data):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x = torch.relu(self.gat1(x, edge_index))
+        x = torch.relu(self.gat2(x, edge_index))
+        x = global_mean_pool(x, batch)
+        return self.lin(x)
+
+try:
+    gat_model = GATDetector().to(device)
+    gat_model.load_state_dict(torch.load("gat_model/detector.pth", map_location=device))
+    gat_model.eval()
+    logger.info(f"GAT model loaded on {device}.")
+except Exception as e:
+    gat_model = None
+    logger.error(f"GAT model failed to load: {e}. GAT detection disabled.")
+
 # --- Global Graph ---
 G = nx.DiGraph()
 graph_lock = threading.Lock()
 
 # --- XML Namespaces ---
 SYSMON_NS = "http://schemas.microsoft.com/win/2004/08/events/event"
+
+# --- MITRE ATT&CK Mapping ---
+MITRE = {
+    "reg add HKCU.*Run": "T1547.001",
+    "schtasks /create": "T1053.005",
+    "Net.WebClient.*Download": "T1105",
+    "DnsQuery.*c2": "T1071",
+    "FileCreate.*Temp.*exe": "T1055"
+}
 
 # --- Helper: Parse Timestamp ---
 def parse_iso_timestamp(ts_str):
@@ -129,82 +168,106 @@ def handle_event_1(event_data, timestamp):  # Process Create
     if not child_guid or not parent_guid:
         return
 
+    cmd = event_data.get('CommandLine', '')
+    image = event_data.get('Image', '')
+
     add_node(child_guid, timestamp,
              type='process',
-             name=event_data.get('Image', ''),
+             name=image,
              pid=event_data.get('ProcessId', ''),
-             command_line=event_data.get('CommandLine', ''))
+             command_line=cmd)
     add_node(parent_guid, timestamp,
              type='process',
              name=event_data.get('ParentImage', ''),
              pid=event_data.get('ParentProcessId', ''))
 
     with graph_lock:
-        G.add_edge(parent_guid, child_guid, action='ProcessCreate', timestamp=timestamp)
+        G.add_edge(parent_guid, child_guid, action="ProcessCreate", timestamp=timestamp)
 
     # RF Triage for PowerShell
-    image = event_data.get('Image', '').lower()
-    if 'powershell' in image:
-        cmd = event_data.get('CommandLine', '')
-        triage_powershell(child_guid, cmd)
-        
-        # --- DATA COLLECTION ---
-        # Extract and save features for every PowerShell event
-        try:
-            features = extract_features(child_guid)
-            if features:
-                # Add additional metadata for context
-                features['guid'] = child_guid
-                features['pid'] = event_data.get('ProcessId', '')
-                features['command_line'] = cmd
-                features['timestamp'] = timestamp
-                
-                with open("powershell_training_data.jsonl", "a") as f:
-                    json.dump(features, f)
-                    f.write("\n")
-                logger.info(f"DATA COLLECTION: Logged features for PowerShell GUID: {child_guid}")
-        except Exception as e:
-            logger.error(f"Failed to save features for {child_guid}: {e}")
+    if 'powershell' in image.lower():
+        is_suspicious_ml = triage_powershell(child_guid, cmd)
 
+        # GAT + XAI if suspicious
+        if gat_model and is_suspicious_ml:
+            with graph_lock:
+                sub = nx.ego_graph(G, child_guid, radius=2)
+            if len(sub) < 3:
+                return
 
-    
+            data = from_networkx(sub)
+            x = []
+            node_list = list(sub.nodes)
+            for n in node_list:
+                d = sub.nodes[n]
+                c = d.get("command_line", "")
+                x.append([
+                    len(set(c))/max(len(c),1),
+                    sub.in_degree(n),
+                    sub.out_degree(n),
+                    int("-enc" in c.lower()),
+                    int(any(k in c.lower() for k in ["download","iwr","webclient"]))
+                ])
+            data.x = torch.tensor(x, dtype=torch.float).to(device)
+            data.edge_index = data.edge_index.to(device)
+            data.batch = torch.zeros(len(x), dtype=torch.long).to(device)
+
+            with torch.no_grad():
+                out = gat_model(data)
+                prob = F.softmax(out, dim=1)[0,1].item()
+                # Attention from first GAT layer
+                self_attn = gat_model.gat1.attention_weights
+                if self_attn is not None:
+                    top_idx = self_attn.mean(1).argmax().item()
+                    clue_node = node_list[top_idx]
+                    clue = sub.nodes[clue_node].get("name", "?").split("\\")[-1]
+                else:
+                    clue = "unknown"
+
+            if prob > 0.75:
+                # Attack chain
+                try:
+                    chain = nx.shortest_path(sub.to_undirected(), parent_guid, child_guid)
+                    chain_names = [sub.nodes[c].get("name","?").split("\\")[-1] for c in chain]
+                except:
+                    chain_names = ["unknown"]
+
+                # MITRE
+                tactic = "Unknown"
+                for pattern, tid in MITRE.items():
+                    if re.search(pattern, cmd, re.I):
+                        tactic = tid
+                        break
+
+                alert = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "ALERT": "LIVING_OFF_THE_LAND",
+                    "guid": child_guid,
+                    "command": cmd[:200],
+                    "confidence": round(prob, 3),
+                    "attack_chain": " → ".join(chain_names),
+                    "top_evidence": clue,
+                    "MITRE": tactic
+                }
+                malicious_logger.info(json.dumps(alert, separators=(',',':')))
+                print(f"GAT DETECTED | {prob:.0%} | {tactic} | {cmd[:80]}...")
+
+def handle_event_3(event_data, timestamp):  # Network Connect
+    guid = event_data.get('ProcessGuid', '').strip('{}')
+    dest_ip = event_data.get('DestinationIp', '')
+    if not guid or not dest_ip:
+        return
+    add_node(f"ip:{dest_ip}", timestamp, type='ip_address')
+    with graph_lock:
+        G.add_edge(guid, f"ip:{dest_ip}", action='NetworkConnect', timestamp=timestamp)
 
 def handle_event_5(event_data, timestamp):  # Process Terminate
     guid = event_data.get('ProcessGuid', '').strip('{}')
     if not guid:
         return
-    add_node(guid, timestamp, type='process', terminated=True)
     with graph_lock:
-        G.nodes[guid]['terminated'] = timestamp
-
-def handle_event_12(event_data, timestamp):  # Registry Create
-    guid = event_data.get('ProcessGuid', '').strip('{}')
-    target = event_data.get('TargetObject', '')
-    if not guid or not target:
-        return
-    reg_key = target.split('\\')[-1]
-    add_node(f"reg:{target}", timestamp, type='registry', key=reg_key)
-    with graph_lock:
-        G.add_edge(guid, f"reg:{target}", action='RegistryCreate', timestamp=timestamp)
-
-def handle_event_13(event_data, timestamp):  # Registry Set
-    guid = event_data.get('ProcessGuid', '').strip('{}')
-    target = event_data.get('TargetObject', '')
-    value = event_data.get('Details', '')
-    if not guid or not target:
-        return
-    add_node(f"reg:{target}", timestamp, type='registry', value=value)
-    with graph_lock:
-        G.add_edge(guid, f"reg:{target}", action='RegistrySet', timestamp=timestamp)
-
-def handle_event_3(event_data, timestamp):  # Network
-    guid = event_data.get('ProcessGuid', '').strip('{}')
-    ip = event_data.get('DestinationIp', '')
-    if not guid or not ip:
-        return
-    add_node(f"ip:{ip}", timestamp, type='ip_address')
-    with graph_lock:
-        G.add_edge(guid, f"ip:{ip}", action='NetworkConnect', timestamp=timestamp)
+        if G.has_node(guid):
+            G.nodes[guid]['terminated'] = timestamp
 
 def handle_event_11(event_data, timestamp):  # File Create
     guid = event_data.get('ProcessGuid', '').strip('{}')
@@ -214,6 +277,24 @@ def handle_event_11(event_data, timestamp):  # File Create
     add_node(f"file:{file}", timestamp, type='file')
     with graph_lock:
         G.add_edge(guid, f"file:{file}", action='FileCreate', timestamp=timestamp)
+
+def handle_event_12(event_data, timestamp):  # Registry Create/Delete
+    guid = event_data.get('ProcessGuid', '').strip('{}')
+    key = event_data.get('TargetObject', '')
+    if not guid or not key:
+        return
+    add_node(f"reg:{key}", timestamp, type='registry')
+    with graph_lock:
+        G.add_edge(guid, f"reg:{key}", action='RegistryCreate', timestamp=timestamp)
+
+def handle_event_13(event_data, timestamp):  # Registry Set
+    guid = event_data.get('ProcessGuid', '').strip('{}')
+    key = event_data.get('TargetObject', '')
+    if not guid or not key:
+        return
+    add_node(f"reg:{key}", timestamp, type='registry')
+    with graph_lock:
+        G.add_edge(guid, f"reg:{key}", action='RegistrySet', timestamp=timestamp)
 
 def handle_event_22(event_data, timestamp):  # DNS Query
     guid = event_data.get('ProcessGuid', '').strip('{}')
@@ -315,7 +396,7 @@ def main():
     parser.add_argument('--prune-hours', type=int, default=24)
     args = parser.parse_args()
 
-    logger.info("Starting Enhanced Provenance Graph Builder + RF Triage")
+    logger.info("Starting Enhanced Provenance Graph Builder + RF Triage + GAT Detection")
     threading.Thread(target=save_loop, daemon=True).start()
     threading.Thread(target=prune_loop, args=(args.prune_hours,), daemon=True).start()
 

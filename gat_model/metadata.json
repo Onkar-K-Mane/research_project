@@ -1,0 +1,7 @@
+{
+  "model": "GAT-4heads-64",
+  "trained_at": "2025-11-08T07:34:26.913960+00:00",
+  "malicious_recall": 1.0,
+  "device": "cpu",
+  "epochs": 18
+}

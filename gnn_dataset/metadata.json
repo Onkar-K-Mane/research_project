@@ -1,0 +1,75 @@
+{
+  "generated_at": "2025-11-08T07:03:35.165680+00:00",
+  "total_graphs": 10000,
+  "total_ps_nodes": 4985,
+  "malicious_ps_nodes": 4985,
+  "features": [
+    "entropy",
+    "degree_in",
+    "degree_out",
+    "has_encoded",
+    "has_download"
+  ],
+  "graph_stats": [
+    {
+      "graph_id": 0,
+      "nodes": 2,
+      "edges": 1,
+      "malicious": false
+    },
+    {
+      "graph_id": 1,
+      "nodes": 5,
+      "edges": 4,
+      "malicious": true
+    },
+    {
+      "graph_id": 2,
+      "nodes": 9,
+      "edges": 8,
+      "malicious": true
+    },
+    {
+      "graph_id": 3,
+      "nodes": 9,
+      "edges": 8,
+      "malicious": true
+    },
+    {
+      "graph_id": 4,
+      "nodes": 2,
+      "edges": 1,
+      "malicious": false
+    },
+    {
+      "graph_id": 5,
+      "nodes": 5,
+      "edges": 4,
+      "malicious": true
+    },
+    {
+      "graph_id": 6,
+      "nodes": 8,
+      "edges": 7,
+      "malicious": true
+    },
+    {
+      "graph_id": 7,
+      "nodes": 2,
+      "edges": 1,
+      "malicious": false
+    },
+    {
+      "graph_id": 8,
+      "nodes": 8,
+      "edges": 7,
+      "malicious": true
+    },
+    {
+      "graph_id": 9,
+      "nodes": 2,
+      "edges": 1,
+      "malicious": false
+    }
+  ]
+}
